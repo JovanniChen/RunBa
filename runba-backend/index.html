@@ -1,0 +1,44 @@
+<input id="input" placeholder="右键试试" />
+
+<div
+  id="menu"
+  style="
+    position: absolute;
+    display: none;
+    background: #fff;
+    border: 1px solid #ccc;
+    padding: 6px;
+    cursor: pointer;
+  "
+>
+  粘贴
+</div>
+
+<script>
+  const input = document.getElementById('input')
+  const menu = document.getElementById('menu')
+
+  // 右键
+  input.addEventListener('contextmenu', (e) => {
+    e.preventDefault() // 禁用系统右键
+    menu.style.left = e.pageX + 'px'
+    menu.style.top = e.pageY + 'px'
+    menu.style.display = 'block'
+  })
+
+  // 点击“粘贴”
+  menu.addEventListener('click', async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      input.value += text // 或 = text
+    } catch (err) {
+      alert('无法读取剪贴板，请检查权限')
+    }
+    menu.style.display = 'none'
+  })
+
+  // 点击其他地方关闭菜单
+  document.addEventListener('click', () => {
+    menu.style.display = 'none'
+  })
+</script>

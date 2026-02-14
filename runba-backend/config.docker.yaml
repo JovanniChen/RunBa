@@ -1,0 +1,46 @@
+# RunBa Backend API - Docker compose config
+
+app:
+  name: "RunBa Backend API"
+  version: "1.0.0"
+  environment: "production"
+
+server:
+  host: "0.0.0.0"
+  port: "8080"
+  mode: "release"
+  read_timeout: 30
+  write_timeout: 30
+  idle_timeout: 60
+
+database:
+  host: "mysql"
+  port: "3306"
+  user: "runba"
+  password: "ChangeMeDBPass!"
+  name: "rb"
+  charset: "utf8mb4"
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime: 3600
+  log_level: "warn"
+
+jwt:
+  secret: "ChangeMeToAtLeast32CharsForProductionJWTSecret"
+  expiration: 24
+  refresh_expiration: 168
+
+redis:
+  host: "redis"
+  port: "6379"
+  password: ""
+  db: 0
+  pool_size: 10
+  dial_timeout: 5
+  read_timeout: 3
+  write_timeout: 3
+
+log:
+  level: "info"
+  format: "json"
+  output: "stdout"

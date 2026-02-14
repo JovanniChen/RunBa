@@ -1,0 +1,38 @@
+# 编译输出
+/steam-backend
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试二进制文件和覆盖率文件
+*.test
+*.out
+*.cover
+
+# 依赖分析文件
+go.work
+
+# 环境变量文件（如果包含敏感信息）
+# .env
+
+# IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+
+# macOS
+.DS_Store
+
+# 缓存目录
+.cache/
