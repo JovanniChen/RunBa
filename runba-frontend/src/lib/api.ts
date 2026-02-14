@@ -324,7 +324,10 @@ export const certificateAPI = {
 // 证书公共查询API
 export const certificatePublicAPI = {
   getCertificateByNo: (no: string) =>
-    publicRequest.get('/certificates/public', { params: { no } })
+    publicRequest.get<ApiResponse<Certificate>, ApiResponse<Certificate>>(
+      '/certificates/public',
+      { params: { no } }
+    )
 }
 
 // 锻刀所管理相关API

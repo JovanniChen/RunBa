@@ -5,10 +5,10 @@ services:
     restart: unless-stopped
     command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     environment:
-      MYSQL_ROOT_PASSWORD: "ChangeMeRootPass!"
+      MYSQL_ROOT_PASSWORD: "Jio19880617"
       MYSQL_DATABASE: "rb"
       MYSQL_USER: "runba"
-      MYSQL_PASSWORD: "ChangeMeDBPass!"
+      MYSQL_PASSWORD: "Jio19880617"
       TZ: "Asia/Tokyo"
     volumes:
       - runba_mysql_data:/var/lib/mysql
