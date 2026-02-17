@@ -33,9 +33,9 @@ sudo apt upgrade -y
 如果启用了 UFW 防火墙：
 
 ```bash
+sudo ufw allow 22/tcp
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
-sudo ufw allow 22/tcp
 sudo ufw enable
 sudo ufw status
 ```
@@ -47,7 +47,7 @@ sudo ufw status
 ### 2.1 安装基础工具
 
 ```bash
-sudo apt install -y nginx mysql-server redis-server curl git build-essential
+sudo apt install -y nginx mysql-server curl git build-essential
 ```
 
 ### 2.2 安装 Node.js 20
@@ -72,6 +72,9 @@ sudo tar -C /usr/local -xzf go1.24.5.linux-amd64.tar.gz
 echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh
 source /etc/profile.d/go.sh
 
+# 国内服务器配置 Go 模块代理（海外服务器可跳过）
+go env -w GOPROXY=https://goproxy.cn,direct
+
 # 验证安装
 go version
 ```
@@ -82,15 +85,11 @@ go version
 # 启动 MySQL
 sudo systemctl enable --now mysql
 
-# 启动 Redis
-sudo systemctl enable --now redis-server
-
 # 启动 Nginx
 sudo systemctl enable --now nginx
 
 # 验证服务状态
 sudo systemctl status mysql
-sudo systemctl status redis-server
 sudo systemctl status nginx
 ```
 
@@ -107,15 +106,20 @@ sudo useradd -r -s /usr/sbin/nologin -m runba
 ### 3.2 创建部署目录
 
 ```bash
+# 部署目录（当前用户拥有，用于拉取代码和构建）
 sudo mkdir -p /opt/runba
 sudo chown -R $USER:$USER /opt/runba
+
+# 备份目录
+sudo mkdir -p /opt/runba/backups
 ```
 
 部署目录结构：
 ```
 /opt/runba/
 ├── runba-backend/    # 后端项目
-└── runba-frontend/   # 前端项目
+├── runba-frontend/   # 前端项目
+└── backups/          # 数据库备份
 ```
 
 ---
@@ -219,7 +223,7 @@ CREATE TABLE users (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 插入默认管理员（账号：admin，密码：ChangeMe123!）
--- ⚠️ 上线后请立即修改密码
+-- 上线后请立即修改密码
 INSERT INTO users(username, password, nickname, status, created_at, updated_at)
 VALUES('admin', '$2a$10$Q7zEbOkd728rwWywoJzxuOTaPoWrhlWdnPP8gemPxNFzNLYIsZ.1m', 'admin', 1, NOW(), NOW());
 
@@ -236,42 +240,51 @@ EXIT;
 
 ```bash
 cd /opt/runba/runba-backend
-cp config.yaml config.yaml.bak
 nano config.yaml
 ```
 
 关键配置项（请根据实际情况修改）：
 
 ```yaml
+# 应用基本配置
 app:
-  name: "RunBa Backend"
-  version: "1.0.0"
+  name: 'RunBa Backend API'
+  version: '1.0.0'
+  environment: 'production'
 
+# 服务器配置
 server:
-  port: 8080
-  mode: release  # 生产环境必须设置为 release
+  host: '0.0.0.0'
+  port: '8080'
+  mode: 'release'  # 生产环境必须设置为 release
+  read_timeout: 30
+  write_timeout: 30
+  idle_timeout: 60
 
+# 数据库配置
 database:
-  host: localhost
-  port: 3306
-  username: runba
-  password: YourStrongPassword123!  # 与上面创建的数据库密码一致
-  dbname: rb
+  host: '127.0.0.1'
+  port: '3306'
+  user: 'runba'
+  password: 'YourStrongPassword123!'  # 与上面创建的数据库密码一致
+  name: 'rb'
+  charset: 'utf8mb4'
   max_idle_conns: 10
   max_open_conns: 100
+  conn_max_lifetime: 3600
+  log_level: 'warn'
 
-redis:
-  host: localhost
-  port: 6379
-  password: ""
-  db: 0
-
+# JWT 配置
 jwt:
-  secret: "Your-Very-Strong-JWT-Secret-At-Least-32-Characters-Long!"  # ⚠️ 必须修改为强随机字符串
-  expiration: 168  # Token 过期时间（小时）
+  secret: 'Your-JWT-Secret-Key'
+  expiration: 24
+  refresh_expiration: 168
 
+# 日志配置
 log:
-  level: info  # debug, info, warn, error
+  level: 'info'
+  format: 'json'
+  output: 'stdout'
 ```
 
 ### 6.2 编译后端
@@ -282,7 +295,8 @@ cd /opt/runba/runba-backend
 # 下载依赖
 go mod download
 
-# 编译二进制文件
+# 编译二进制文件（保留上一个版本用于快速回滚）
+[ -f runba-backend ] && cp runba-backend runba-backend.prev
 go build -o runba-backend main.go
 
 # 验证编译结果
@@ -302,9 +316,8 @@ sudo nano /etc/systemd/system/runba-backend.service
 ```ini
 [Unit]
 Description=RunBa Backend API Service
-Documentation=https://github.com/your-org/runba
-After=network.target mysql.service redis-server.service
-Wants=mysql.service redis-server.service
+After=network.target mysql.service
+Wants=mysql.service
 
 [Service]
 Type=simple
@@ -316,6 +329,9 @@ Restart=always
 RestartSec=3
 StandardOutput=journal
 StandardError=journal
+
+# 资源限制
+LimitNOFILE=65535
 
 # 安全加固
 NoNewPrivileges=true
@@ -348,39 +364,41 @@ sudo journalctl -u runba-backend -f
 
 ## 7. 前端部署
 
-### 7.1 安装依赖
+### 7.1 配置 Next.js standalone 输出
+
+编辑 `next.config.ts`，添加 `output: 'standalone'`：
+
+```typescript
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  output: 'standalone',
+  async rewrites() {
+    return [
+      {
+        source: '/api/:path*',
+        destination: 'http://localhost:8080/api/:path*',
+      },
+    ]
+  },
+};
+
+export default nextConfig;
+```
+
+> standalone 模式会在构建时生成独立运行目录，不依赖完整的 node_modules，部署体积更小。
+
+### 7.2 安装依赖并构建
 
 ```bash
 cd /opt/runba/runba-frontend
 npm ci
-```
-
-### 7.2 配置前端 API 地址（可选）
-
-如果需要修改 API 配置，编辑：
-
-```bash
-nano src/lib/api.ts
-```
-
-确认 API 配置正确（默认使用本地代理）：
-
-```typescript
-export const API_CONFIG = {
-  LOCAL: '/api/v1',  // 通过 Nginx 反向代理
-  REMOTE: 'http://your-server-ip:8080/api/v1'
-}
-```
-
-### 7.3 构建前端
-
-```bash
 npm run build
 ```
 
-构建成功后会生成 `.next` 目录。
+构建成功后会生成 `.next/standalone` 目录。
 
-### 7.4 创建 systemd 服务
+### 7.3 创建 systemd 服务
 
 创建服务文件：
 
@@ -393,7 +411,6 @@ sudo nano /etc/systemd/system/runba-frontend.service
 ```ini
 [Unit]
 Description=RunBa Frontend (Next.js)
-Documentation=https://github.com/your-org/runba
 After=network.target
 
 [Service]
@@ -401,12 +418,17 @@ Type=simple
 User=runba
 Group=runba
 WorkingDirectory=/opt/runba/runba-frontend
-ExecStart=/usr/bin/npm run start -- -p 3000 -H 127.0.0.1
+ExecStart=/usr/bin/node .next/standalone/server.js
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=127.0.0.1
 StandardOutput=journal
 StandardError=journal
+
+# 资源限制
+LimitNOFILE=65535
 
 # 安全加固
 NoNewPrivileges=true
@@ -414,6 +436,18 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
+```
+
+### 7.4 准备 standalone 静态资源
+
+standalone 模式不会自动复制 `public` 和 `.next/static` 目录，需要手动链接：
+
+```bash
+cd /opt/runba/runba-frontend
+
+# 链接静态资源（构建后执行）
+cp -r public .next/standalone/public
+cp -r .next/static .next/standalone/.next/static
 ```
 
 ### 7.5 授权并启动前端服务
@@ -448,14 +482,38 @@ sudo nano /etc/nginx/sites-available/runba.conf
 写入以下内容：
 
 ```nginx
+# API 限流：每个 IP 每秒 20 个请求，突发 40 个
+limit_req_zone $binary_remote_addr zone=api_limit:10m rate=20r/s;
+
 server {
     listen 80;
     server_name your-domain.com;  # 修改为你的域名或服务器 IP
 
     client_max_body_size 20m;
 
-    # 后端 API 代理
+    # --- 安全响应头 ---
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # --- Gzip 压缩 ---
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript image/svg+xml;
+
+    # --- Next.js 静态资源（带 hash，长缓存）---
+    location /_next/static/ {
+        proxy_pass http://127.0.0.1:3000;
+        expires 365d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # --- 后端 API 代理 ---
     location /api/ {
+        limit_req zone=api_limit burst=40 nodelay;
+
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -469,12 +527,12 @@ server {
         proxy_read_timeout 60s;
     }
 
-    # 前端应用代理
+    # --- 前端应用代理 ---
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
 
-        # WebSocket 支持
+        # WebSocket 支持（Next.js HMR 等）
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
 
@@ -549,14 +607,13 @@ curl http://127.0.0.1:8080/health
 {"status":"ok"}
 ```
 
-### 10.2 检查服务状态
+### 10.2 检查所有服务状态
 
 ```bash
 sudo systemctl status runba-backend
 sudo systemctl status runba-frontend
 sudo systemctl status nginx
 sudo systemctl status mysql
-sudo systemctl status redis-server
 ```
 
 ### 10.3 查看服务日志
@@ -588,7 +645,7 @@ http://your-domain.com/api/v1 # 访问后端 API
 - 用户名：`admin`
 - 密码：`ChangeMe123!`
 
-**⚠️ 重要：首次登录后请立即修改密码！**
+**首次登录后请立即修改密码。**
 
 ---
 
@@ -597,7 +654,6 @@ http://your-domain.com/api/v1 # 访问后端 API
 ### 11.1 从开发机推送代码
 
 ```bash
-# 在开发机上
 cd /Users/jio/codespace/go/src/RunBa
 git add .
 git commit -m "更新描述"
@@ -606,16 +662,22 @@ git push origin main
 
 ### 11.2 在服务器上更新部署
 
+可以手动执行以下步骤，也可以使用 [11.3 节的部署脚本](#113-一键部署脚本)。
+
 ```bash
 # SSH 登录服务器
 ssh user@your-server-ip
+
+# 备份数据库
+mysqldump -u runba -p rb > /opt/runba/backups/rb_$(date +%Y%m%d_%H%M%S).sql
 
 # 拉取最新代码
 cd /opt/runba
 git pull origin main
 
-# 更新后端
+# 更新后端（保留上一个二进制用于回滚）
 cd /opt/runba/runba-backend
+cp runba-backend runba-backend.prev
 go build -o runba-backend main.go
 sudo systemctl restart runba-backend
 sudo systemctl status runba-backend
@@ -624,24 +686,107 @@ sudo systemctl status runba-backend
 cd /opt/runba/runba-frontend
 npm ci
 npm run build
+cp -r public .next/standalone/public
+cp -r .next/static .next/standalone/.next/static
+sudo chown -R runba:runba /opt/runba/runba-frontend
 sudo systemctl restart runba-frontend
 sudo systemctl status runba-frontend
 
 # 查看服务日志确认无误
-sudo journalctl -u runba-backend -f
-sudo journalctl -u runba-frontend -f
+sudo journalctl -u runba-backend -n 20 --no-pager
+sudo journalctl -u runba-frontend -n 20 --no-pager
 ```
 
-### 11.3 回滚操作（如遇问题）
+### 11.3 一键部署脚本
+
+创建部署脚本：
 
 ```bash
-# 回滚代码
+nano /opt/runba/deploy.sh
+chmod +x /opt/runba/deploy.sh
+```
+
+写入以下内容：
+
+```bash
+#!/bin/bash
+set -e
+
+DEPLOY_DIR="/opt/runba"
+BACKUP_DIR="$DEPLOY_DIR/backups"
+
+echo "=== RunBa 部署开始 ==="
+
+# 1. 备份数据库
+echo "[1/6] 备份数据库..."
+mysqldump -u runba -p"$1" rb > "$BACKUP_DIR/rb_$(date +%Y%m%d_%H%M%S).sql"
+# 保留最近 10 个备份
+ls -t "$BACKUP_DIR"/rb_*.sql | tail -n +11 | xargs -r rm
+
+# 2. 拉取代码
+echo "[2/6] 拉取最新代码..."
+cd "$DEPLOY_DIR"
+git pull origin main
+
+# 3. 编译后端
+echo "[3/6] 编译后端..."
+cd "$DEPLOY_DIR/runba-backend"
+[ -f runba-backend ] && cp runba-backend runba-backend.prev
+go build -o runba-backend main.go
+
+# 4. 构建前端
+echo "[4/6] 构建前端..."
+cd "$DEPLOY_DIR/runba-frontend"
+npm ci
+npm run build
+cp -r public .next/standalone/public
+cp -r .next/static .next/standalone/.next/static
+
+# 5. 修复权限并重启服务
+echo "[5/6] 重启服务..."
+sudo chown -R runba:runba "$DEPLOY_DIR/runba-backend"
+sudo chown -R runba:runba "$DEPLOY_DIR/runba-frontend"
+sudo systemctl restart runba-backend
+sudo systemctl restart runba-frontend
+
+# 6. 验证
+echo "[6/6] 验证服务状态..."
+sleep 3
+sudo systemctl is-active runba-backend
+sudo systemctl is-active runba-frontend
+
+echo "=== 部署完成 ==="
+```
+
+使用方式：
+
+```bash
+# 参数为数据库密码
+bash /opt/runba/deploy.sh 'YourDBPassword'
+```
+
+### 11.4 回滚操作（如遇问题）
+
+**快速回滚**（使用上一个二进制，无需重新编译）：
+
+```bash
+# 回滚后端
+cd /opt/runba/runba-backend
+cp runba-backend.prev runba-backend
+sudo systemctl restart runba-backend
+
+# 回滚数据库（如有需要）
+mysql -u runba -p rb < /opt/runba/backups/rb_<timestamp>.sql
+```
+
+**代码回滚**：
+
+```bash
 cd /opt/runba
 git log --oneline -n 5  # 查看最近提交
-git reset --hard <commit-hash>
+git revert <commit-hash> # 生成一个撤销提交，不会丢失历史
 
-# 重新编译和重启
-# （按上述更新步骤操作）
+# 重新编译和重启（按上述更新步骤操作）
 ```
 
 ---
@@ -655,13 +800,13 @@ git reset --hard <commit-hash>
 sudo journalctl -u runba-backend -n 100 --no-pager
 
 # 检查配置文件
-nano /opt/runba/runba-backend/config.yaml
+cat /opt/runba/runba-backend/config.yaml
 
 # 检查数据库连接
 mysql -u runba -p -h localhost rb
 
 # 检查端口占用
-sudo lsof -i :8080
+sudo ss -tlnp | grep 8080
 ```
 
 ### 12.2 前端构建失败
@@ -699,7 +844,7 @@ sudo systemctl status runba-backend
 sudo systemctl status runba-frontend
 
 # 检查端口监听
-sudo netstat -tlnp | grep -E '8080|3000'
+sudo ss -tlnp | grep -E '8080|3000'
 
 # 查看 Nginx 错误日志
 sudo tail -f /var/log/nginx/error.log
@@ -718,40 +863,73 @@ chmod +x /opt/runba/runba-backend/runba-backend
 
 ---
 
-## 附录：安全建议
+## 附录 A：日志轮转配置
 
-1. **修改默认密码**
-   - 管理员账号密码
-   - 数据库密码
-   - JWT Secret
+创建 logrotate 配置，防止 journal 日志过大：
 
-2. **定期备份数据库**
-   ```bash
-   # 创建备份脚本
-   mysqldump -u runba -p rb > /backup/rb_$(date +%Y%m%d_%H%M%S).sql
-   ```
+```bash
+sudo nano /etc/logrotate.d/runba-nginx
+```
 
-3. **配置防火墙规则**
-   - 只开放必要端口（80, 443, 22）
-   - 限制 SSH 访问
+写入：
 
-4. **启用日志审计**
-   ```bash
-   # 设置日志轮转
-   sudo nano /etc/logrotate.d/runba
-   ```
+```
+/var/log/nginx/access.log
+/var/log/nginx/error.log {
+    daily
+    missingok
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    sharedscripts
+    postrotate
+        [ -f /var/run/nginx.pid ] && kill -USR1 $(cat /var/run/nginx.pid)
+    endscript
+}
+```
 
-5. **监控服务状态**
-   - 配置监控告警（如 Prometheus + Grafana）
-   - 定期检查系统资源使用情况
+配置 systemd journal 日志大小限制：
 
----
+```bash
+sudo nano /etc/systemd/journald.conf
+```
 
-## 技术支持
+设置：
 
-如遇问题请查看：
-- 后端日志：`sudo journalctl -u runba-backend -f`
-- 前端日志：`sudo journalctl -u runba-frontend -f`
-- Nginx 日志：`/var/log/nginx/error.log`
+```ini
+[Journal]
+SystemMaxUse=500M
+```
 
-项目仓库：https://github.com/your-org/runba
+重启 journald：
+
+```bash
+sudo systemctl restart systemd-journald
+```
+
+## 附录 B：数据库自动备份
+
+创建 crontab 定时备份任务：
+
+```bash
+sudo crontab -e
+```
+
+添加每天凌晨 3 点备份：
+
+```
+0 3 * * * mysqldump -u runba -p'YourDBPassword' rb | gzip > /opt/runba/backups/rb_$(date +\%Y\%m\%d).sql.gz && find /opt/runba/backups -name "rb_*.sql.gz" -mtime +30 -delete
+```
+
+## 附录 C：安全检查清单
+
+部署完成后逐项确认：
+
+- [ ] 管理员默认密码已修改
+- [ ] config.yaml 中的数据库密码已修改
+- [ ] config.yaml 中的 JWT Secret 已修改
+- [ ] config.yaml 中 server.mode 为 `release`
+- [ ] UFW 防火墙已启用，仅开放 22/80/443
+- [ ] MySQL 已禁止 root 远程登录
+- [ ] HTTPS 已配置（如有域名）
